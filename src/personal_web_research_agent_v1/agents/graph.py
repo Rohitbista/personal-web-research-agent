@@ -1,57 +1,27 @@
 from langgraph.graph import StateGraph, END
 
 from personal_web_research_agent_v1.agents.state import AgentState
-from personal_web_research_agent_v1.agents.nodes import agent_node, tools_node
-from personal_web_research_agent_v1.agents.edges import should_continue
+from personal_web_research_agent_v1.agents.nodes import planner_node, researcher_node, synthesizer_node, tools_node          # ToolNode unchanged
+from personal_web_research_agent_v1.agents.edges.routing import route_after_researcher
 
-
-# ── Build the graph ──────────────────────────────────────────────────────────
 graph = StateGraph(AgentState)
 
-# Register nodes
-graph.add_node("agent_node", agent_node)
-graph.add_node("tools_node", tools_node)
+graph.add_node("planner_node",     planner_node)
+graph.add_node("researcher_node",  researcher_node)
+graph.add_node("tools_node",       tools_node)
+graph.add_node("synthesizer_node", synthesizer_node)
 
-# Entry point
-graph.set_entry_point("agent_node")
+graph.set_entry_point("planner_node")
 
-# Conditional routing: after the agent responds, decide what to do next
+graph.add_edge("planner_node", "researcher_node")
+
 graph.add_conditional_edges(
-    "agent_node",
-    should_continue,
-    {
-        "continue": "tools_node",
-        "end": END,
-    },
+    "researcher_node",
+    route_after_researcher,
+    {"tools": "tools_node", "synthesize": "synthesizer_node"},
 )
 
-# After any tool runs, always return to the agent
-graph.add_edge("tools_node", "agent_node")
+graph.add_edge("tools_node",       "researcher_node")
+graph.add_edge("synthesizer_node", END)
 
-# Compile
 app = graph.compile()
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-def print_stream(stream):
-    """Pretty-print each message as it streams through the graph."""
-    for s in stream:
-        message = s["messages"][-1]
-        if isinstance(message, tuple):
-            print(message)
-        else:
-            message.pretty_print()
-
-
-# ── Run ──────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    inputs = {
-        "messages": [
-            (
-                "user",
-                "Add 55 and 66 and then multiply the result with 8. "
-                "And can you also tell me a joke.",
-            )
-        ]
-    }
-    print_stream(app.stream(inputs, stream_mode="values"))
