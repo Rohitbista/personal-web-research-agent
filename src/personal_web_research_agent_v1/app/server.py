@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 import uvicorn
 
-from personal_web_research_agent_v1.app.routes.chat import router as chat_router
 from personal_web_research_agent_v1.app.routes.research import router as research_router
 
 app = FastAPI()
@@ -10,7 +9,6 @@ app = FastAPI()
 def root():
     return {"success":True, "message": "Slack Agent is up and runing"}
 
-app.include_router(chat_router)
 app.include_router(research_router)
 
 def main():
