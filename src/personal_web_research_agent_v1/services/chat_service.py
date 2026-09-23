@@ -3,12 +3,17 @@ from personal_web_research_agent_v1.agents.graph import app   # your compiled La
 # In-memory store — swap for Redis/DB in production
 conversation_history: dict[str, list] = {}
 
+MAX_ITERATIONS = 6  # keep this in sync with state.py
+
+# recursion_limit = planner(1) + researcher+tools pairs(max_iter × 2) + synthesizer(1) + buffer(4)
+RECURSION_LIMIT = 1 + (MAX_ITERATIONS * 2) + 1 + 4  # = 18, but round up generously
+
 def chat(session_id: str, user_message: str) -> str:
     history = conversation_history.get(session_id, [])
     history.append(("user", user_message))
 
     inputs = {"messages": history}
-    config={"recursion_limit": 10}
+    config={"recursion_limit": RECURSION_LIMIT}
 
     last_message = None
 

@@ -1,1 +1,1 @@
-from personal_web_research_agent_v1.agents.edges.should_continue import should_continue
+from personal_web_research_agent_v1.agents.edges.routing import route_after_researcher
