@@ -3,6 +3,14 @@ frontend/app.py
 ───────────────
 Streamlit UI for the Personal Web Research Agent.
 Connects to the FastAPI backend running on localhost:8000.
+
+Performance notes
+─────────────────
+• Completed jobs are cached for 1 hour  — the report never changes once done.
+• Session list is cached for 30 s       — avoids re-fetching on every rerun.
+• Session detail is cached for 15 s     — titles / history change rarely.
+• Active (running/queued) jobs are never cached so SSE + polling stay live.
+• The sidebar no longer fires a separate /sessions call when the cache is warm.
 """
 
 import json
@@ -64,14 +72,61 @@ def api_patch(path: str, json_body: dict):
         return None
 
 
+# ─── Cached fetchers ──────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_sessions() -> list:
+    """Fetch the session list. Cached for 30 s."""
+    try:
+        r = requests.get(f"{BASE_URL}/sessions", timeout=10)
+        r.raise_for_status()
+        return r.json().get("sessions", [])
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_session_detail(session_id: str) -> dict | None:
+    """Fetch a single session's detail. Cached for 15 s."""
+    try:
+        r = requests.get(f"{BASE_URL}/sessions/{session_id}", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_completed_job(job_id: str) -> dict | None:
+    """
+    Fetch a job and cache it for 1 hour — but ONLY when it has reached a
+    terminal state (completed / failed / cancelled).  Active jobs are
+    intentionally not cached so live polling keeps working.
+    """
+    try:
+        r = requests.get(f"{BASE_URL}/research/{job_id}", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("status") in ("completed", "failed", "cancelled"):
+            return data
+        return None          # non-terminal → caller must do a live fetch
+    except Exception:
+        return None
+
+
+def _invalidate_session_cache():
+    """Clear session-related caches after mutations (new job, rename, …)."""
+    _cached_sessions.clear()
+    _cached_session_detail.clear()
+
+
 # ─── Session state defaults ───────────────────────────────────────────────────
 
 def _init_state():
     defaults = {
         "active_session_id": None,
         "active_job_id": None,
-        "sessions_cache": [],      # refreshed on demand
-        "streaming_log": [],       # SSE lines for the current job
+        "streaming_log": [],   # SSE lines for the current job
         "job_status": None,
     }
     for k, v in defaults.items():
@@ -99,12 +154,11 @@ def render_sidebar():
         st.caption("Past Sessions")
 
         if st.button("↻  Refresh", use_container_width=True):
-            _refresh_sessions()
+            _invalidate_session_cache()
+            st.rerun()
 
-        sessions = st.session_state.sessions_cache
-        if not sessions:
-            _refresh_sessions()
-            sessions = st.session_state.sessions_cache
+        # Single cached fetch — no extra HTTP call on every rerun
+        sessions = _cached_sessions()
 
         if not sessions:
             st.info("No sessions yet. Start your first research above!")
@@ -113,18 +167,17 @@ def render_sidebar():
                 label = f"📂 {sess['title'][:38]}{'…' if len(sess['title']) > 38 else ''}"
                 is_active = sess["session_id"] == st.session_state.active_session_id
                 btn_type = "primary" if is_active else "secondary"
-                if st.button(label, key=f"sess_{sess['session_id']}", use_container_width=True, type=btn_type):
+                if st.button(
+                    label,
+                    key=f"sess_{sess['session_id']}",
+                    use_container_width=True,
+                    type=btn_type,
+                ):
                     st.session_state.active_session_id = sess["session_id"]
                     st.session_state.active_job_id = None
                     st.session_state.streaming_log = []
                     st.session_state.job_status = None
                     st.rerun()
-
-
-def _refresh_sessions():
-    data = api_get("/sessions")
-    if data:
-        st.session_state.sessions_cache = data.get("sessions", [])
 
 
 # ─── Main area ────────────────────────────────────────────────────────────────
@@ -134,8 +187,10 @@ def render_main():
 
     # ── Existing session view ─────────────────────────────────────────────────
     if session_id:
-        data = api_get(f"/sessions/{session_id}")
+        # Cached — no round-trip on most reruns
+        data = _cached_session_detail(session_id)
         if not data:
+            st.error("Session not found.")
             return
 
         col_title, col_rename = st.columns([4, 1])
@@ -147,13 +202,13 @@ def render_main():
                 if st.button("Save", key="rename_save"):
                     result = api_patch(f"/sessions/{session_id}/rename", {"title": new_title})
                     if result:
-                        _refresh_sessions()
+                        _invalidate_session_cache()
                         st.rerun()
 
         st.caption(f"Session ID: `{session_id}`")
         st.divider()
 
-        # Research history
+        # Research history — already inside the cached session response
         history = data.get("research_history", [])
         if history:
             with st.expander(f"📜 History ({len(history)} jobs)", expanded=False):
@@ -213,15 +268,19 @@ def _render_query_form(session_id: str | None):
             st.session_state.active_job_id = result["research_id"]
             st.session_state.streaming_log = []
             st.session_state.job_status = "queued"
-            _refresh_sessions()
+            _invalidate_session_cache()
             st.rerun()
     elif submitted:
         st.warning("Please enter a query before starting.")
 
 
 def _render_job(job_id: str):
-    # Fetch current state from DB
-    data = api_get(f"/research/{job_id}")
+    # ── Try the 1-hour cache first (terminal jobs only) ───────────────────────
+    data = _cached_completed_job(job_id)
+
+    # Cache miss means the job is still active — do a live fetch
+    if data is None:
+        data = api_get(f"/research/{job_id}")
     if not data:
         return
 
@@ -235,6 +294,8 @@ def _render_job(job_id: str):
     if status in ("queued", "running"):
         if st.button("🛑 Cancel", key="cancel_btn"):
             api_post(f"/research/{job_id}/cancel")
+            # Bust the cache so the cancelled status shows immediately
+            _cached_completed_job.clear()
             st.rerun()
 
     # ── SSE live stream (only for active jobs) ────────────────────────────────
@@ -244,6 +305,9 @@ def _render_job(job_id: str):
         # Poll until done, then refresh
         with st.spinner("Researching… (page auto-refreshes when done)"):
             _poll_until_done(job_id)
+
+        # Job just finished — bust the session cache so history updates
+        _invalidate_session_cache()
         st.rerun()
 
     # ── Show logged events (if any captured earlier) ──────────────────────────
@@ -252,13 +316,12 @@ def _render_job(job_id: str):
             for line in st.session_state.streaming_log:
                 st.text(line)
 
-    # ── Final report ─────────────────────────────────────────────────────────
+    # ── Final report ──────────────────────────────────────────────────────────
     if status == "completed" and data.get("report"):
         st.success("Research complete!")
         st.markdown("---")
         st.markdown(data["report"])
 
-        # Download button
         st.download_button(
             label="⬇️  Download report (.md)",
             data=data["report"],
@@ -276,8 +339,8 @@ def _render_job(job_id: str):
 def _stream_events(job_id: str):
     """
     Consume the SSE stream for *this* job and store lines in session state.
-    Uses a short timeout so Streamlit's script runner isn't blocked forever.
-    Stops as soon as we've seen 30 events or the stream closes.
+    Stops after seeing a terminal event or 50 events, whichever comes first,
+    so Streamlit's script runner is never blocked for long.
     """
     log = st.session_state.streaming_log
     placeholder = st.empty()
@@ -312,7 +375,6 @@ def _stream_events(job_id: str):
                     log.append(line)
                     placeholder.text(line)
 
-                    # Stop consuming — let _poll_until_done take over
                     if msg_type in ("completed", "error") or i >= 50:
                         break
     except Exception:
