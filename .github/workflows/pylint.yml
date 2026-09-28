@@ -1,0 +1,24 @@
+name: Pylint
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: '3.13.5'
+
+      - name: Install Dependencies
+        # This will install both pylint and streamlit if they are in your uv lockfile
+        run: uv sync --frozen
+
+      - name: Run Pylint
+        # Space-separate your folders to lint both src and frontend at once
+        run: uv run pylint src/ frontend/
