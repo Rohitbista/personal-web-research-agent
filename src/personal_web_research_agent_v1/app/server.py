@@ -4,14 +4,24 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware 
 
+from personal_web_research_agent_v1.logging.logger_service import LoggerService
+
+# ── Logging (must be first) ───────────────────────────────────────────
+logger = LoggerService()#level="DEBUG")   # This level is for the debug logs to show up
+
 from personal_web_research_agent_v1.app.routes.research import router as research_router
 from personal_web_research_agent_v1.database.database import init_db
 
+_CTX = "src/app/server"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    logger.info("Starting up", context=_CTX)
+
     """Create DB tables on startup (no-op if they already exist)."""
+    logger.info("Initiating sqlite db...", context=_CTX)
     init_db()
+    logger.info("Initiated sqlite db", context=_CTX)
     yield
 
 
