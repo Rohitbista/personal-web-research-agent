@@ -104,7 +104,7 @@ def get_session_detail(session_id: str, db: Session = Depends(get_db)):
         return result
     except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.warning(
+        logger.warn(
             "Outgoing response: Failed to get session detail",
             trace_id=trace_id,
             context=_CTX,
@@ -168,7 +168,7 @@ def rename_session(
         return result
     except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.warning(
+        logger.warn(
             "Outgoing response: Failed to rename session",
             trace_id=trace_id,
             context=_CTX,
@@ -254,7 +254,7 @@ async def start_research(
         )
     except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.warning(
+        logger.warn(
             "Outgoing response: Failed to start research job",
             trace_id=trace_id,
             context=_CTX,
@@ -324,7 +324,7 @@ async def stream_research(job_id: str):
         return EventSourceResponse(_event_generator())
     except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.warning(
+        logger.warn(
             "Outgoing response: Failed to stream research",
             trace_id=trace_id,
             context=_CTX,
@@ -388,7 +388,7 @@ def get_research(job_id: str, db: Session = Depends(get_db)):
         )
     except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.warning(
+        logger.warn(
             "Outgoing response: Failed to get research status",
             trace_id=trace_id,
             context=_CTX,
@@ -451,7 +451,7 @@ def cancel_research(job_id: str, db: Session = Depends(get_db)):
         return {"research_id": job_id, "status": "cancelled"}
     except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.warning(
+        logger.warn(
             "Outgoing response: Failed to cancel research job",
             trace_id=trace_id,
             context=_CTX,
