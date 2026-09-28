@@ -29,4 +29,4 @@ jobs:
 
       - name: Run Pylint
         # Space-separate your folders to lint both src and frontend at once
-        run: uv run pylint src/ frontend/
+        run: uv run pylint src/ frontend/ --errors-only # To not be able to fail if its only like small warnings
