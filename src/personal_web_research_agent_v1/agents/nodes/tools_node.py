@@ -10,9 +10,11 @@ _CTX = "src/agents/nodes/tools_node"
 # ToolNode itself is a callable; we subclass it to intercept __call__.
 
 class _LoggedToolNode(ToolNode):
-    def __call__(self, state, **kwargs):
-        trace_id = state.get("trace_id", "")
-        last_msg  = state["messages"][-1]
+    def invoke(self, input, config=None, **kwargs):
+        # Extract trace_id and messages from input state
+        trace_id = input.get("trace_id", "") if isinstance(input, dict) else ""
+        messages = input.get("messages", []) if isinstance(input, dict) else []
+        last_msg = messages[-1] if messages else None
         tool_calls = getattr(last_msg, "tool_calls", []) or []
 
         logger.info(
@@ -21,11 +23,11 @@ class _LoggedToolNode(ToolNode):
             context=_CTX,
             data={
                 "tool_count": len(tool_calls),
-                "tools":      [tc.get("name") for tc in tool_calls],
+                "tools": [tc.get("name") for tc in tool_calls],
             },
         )
 
-        result = super().__call__(state, **kwargs)
+        result = super().invoke(input, config=config, **kwargs)
 
         logger.info(
             "Tools node completed",
