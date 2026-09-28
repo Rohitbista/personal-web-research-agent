@@ -59,7 +59,7 @@ class RenameSessionRequest(BaseModel):
 
 @dataclass
 class ResearchJob:
-    id: str                        = field(default_factory=lambda: "research-"+str(uuid.uuid4()))
+    id: str                        = field(default_factory=lambda: "research-job-"+str(uuid.uuid4()))
     query: str                     = ""
     session_id: str                = ""
     status: str                    = "queued"

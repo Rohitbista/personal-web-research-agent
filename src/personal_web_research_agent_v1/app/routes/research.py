@@ -1,5 +1,13 @@
+"""
+app/routes/research.py
+───────────────────────
+FastAPI router.  All business logic and persistence go through the
+services layer; this file only handles HTTP concerns.
+"""
+
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
 from personal_web_research_agent_v1.app.models import (
@@ -11,13 +19,8 @@ from personal_web_research_agent_v1.app.models import (
     SessionListResponse,
     RenameSessionRequest,
 )
-from personal_web_research_agent_v1.app.job_store import (
-    create_job,
-    get_job,
-    get_session,
-    get_jobs_for_session,
-    list_sessions,
-)
+from personal_web_research_agent_v1.database.database import get_db
+from personal_web_research_agent_v1.services import session_service, job_service
 from personal_web_research_agent_v1.services.research_service import run_research_job
 
 router = APIRouter(prefix="/api/v1", tags=["research"])
@@ -28,43 +31,39 @@ router = APIRouter(prefix="/api/v1", tags=["research"])
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/sessions", response_model=SessionListResponse)
-async def get_all_sessions():
-    """
-    List all sessions (newest first).
-    Each session contains a lightweight history of its research jobs.
-    """
-    sessions = list_sessions()
+def get_all_sessions(db: Session = Depends(get_db)):
+    """List all sessions (newest first) with lightweight research history."""
+    records = session_service.list_sessions(db)
     return SessionListResponse(
-        sessions=[_build_session_response(s.id) for s in sessions]
+        sessions=[_build_session_response(db, r.id) for r in records]
     )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
-async def get_session_detail(session_id: str):
-    """Full detail for one session — title, timestamps, and its research history."""
-    session = get_session(session_id)
-    if not session:
+def get_session_detail(session_id: str, db: Session = Depends(get_db)):
+    """Full detail for one session — title, timestamps, and research history."""
+    if not session_service.get_session(db, session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-    return _build_session_response(session_id)
+    return _build_session_response(db, session_id)
 
 
 @router.patch("/sessions/{session_id}/rename", response_model=SessionResponse)
-async def rename_session(session_id: str, request: RenameSessionRequest):
+def rename_session(
+    session_id: str,
+    request: RenameSessionRequest,
+    db: Session = Depends(get_db),
+):
     """
     Rename a session's title.
-
-    The title is set automatically from the first query when the session is
-    created, but users can override it here at any time.
-    ``{"title": "My custom title"}``
+    The title is auto-set from the first query on creation; this overrides it.
     """
-    session = get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
     title = request.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="Title must not be empty")
-    session.title = title
-    return _build_session_response(session_id)
+    record = session_service.rename_session(db, session_id, title)
+    if not record:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _build_session_response(db, session_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -72,17 +71,33 @@ async def rename_session(session_id: str, request: RenameSessionRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/research", response_model=StartResearchResponse, status_code=202)
-async def start_research(request: StartResearchRequest):
+async def start_research(
+    request: StartResearchRequest,
+    db: Session = Depends(get_db),
+):
     """
     Start a new research job.
 
-    - ``session_id`` is optional. If omitted (or unknown), a new session is
-      created automatically and its id is returned so the client can group
-      follow-up queries under the same conversation.
-    - Returns immediately; research runs in the background.
+    ``session_id`` is optional — a new session is created automatically when
+    omitted (or when the supplied id is not found in the DB).
+    Returns immediately; research runs in the background.
     """
-    job = create_job(query=request.query, session_id=request.session_id)
+    # Resolve or auto-create the session
+    session_id = request.session_id
+    if session_id:
+        existing = session_service.get_session(db, session_id)
+        if not existing:
+            # Client sent an id we don't know — treat as new session
+            title = _auto_title(request.query)
+            session_service.create_session(db, title=title, session_id=session_id)
+    else:
+        title = _auto_title(request.query)
+        sess = session_service.create_session(db, title=title)
+        session_id = sess.id
+
+    job = job_service.create_job(db, query=request.query, session_id=session_id)
     job.task = asyncio.create_task(run_research_job(job))
+
     return StartResearchResponse(
         research_id=job.id,
         session_id=job.session_id,
@@ -94,12 +109,18 @@ async def start_research(request: StartResearchRequest):
 async def stream_research(job_id: str):
     """
     SSE stream of real-time progress events for a single research job.
-    Each event is JSON: ``{"type": "searching" | "fetching" | "completed" | …, "data": "…"}``
+    Each event is JSON: ``{"type": "searching"|"fetching"|"completed"|…, "data": "…"}``
     The stream closes automatically when the job finishes.
+
+    Note: uses the in-memory live handle (not the DB) because the Queue
+    and asyncio primitives cannot be stored in SQLite.
     """
-    job = get_job(job_id)
+    job = job_service.get_live_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found or server was restarted (SSE unavailable for past jobs)",
+        )
 
     async def _event_generator():
         while True:
@@ -112,35 +133,42 @@ async def stream_research(job_id: str):
 
 
 @router.get("/research/{job_id}", response_model=ResearchStatusResponse)
-async def get_research(job_id: str):
-    """Poll job status. When ``status == 'completed'``, the ``report`` field is populated."""
-    job = get_job(job_id)
-    if not job:
+def get_research(job_id: str, db: Session = Depends(get_db)):
+    """
+    Poll job status.  When ``status == 'completed'`` the ``report`` field is populated.
+    This reads from the DB so it works even after a server restart.
+    """
+    record = job_service.get_job_record(db, job_id)
+    if not record:
         raise HTTPException(status_code=404, detail="Job not found")
     return ResearchStatusResponse(
-        research_id=job.id,
-        session_id=job.session_id,
-        status=job.status,
-        query=job.query,
-        report=job.report,
-        error=job.error,
-        created_at=job.created_at,
+        research_id=record.id,
+        session_id=record.session_id,
+        status=record.status,
+        query=record.query,
+        report=record.report,
+        error=record.error,
+        created_at=record.created_at,
     )
 
 
 @router.post("/research/{job_id}/cancel", status_code=200)
-async def cancel_research(job_id: str):
+def cancel_research(job_id: str, db: Session = Depends(get_db)):
     """Signal the background thread to stop after its current LangGraph chunk."""
-    job = get_job(job_id)
-    if not job:
+    record = job_service.get_job_record(db, job_id)
+    if not record:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in ("queued", "running"):
+    if record.status not in ("queued", "running"):
         raise HTTPException(
             status_code=409,
-            detail=f"Cannot cancel a job in '{job.status}' state",
+            detail=f"Cannot cancel a job in '{record.status}' state",
         )
-    job._cancel_event.set()
-    job.status = "cancelled"
+    # Signal the live handle (if the server hasn't restarted)
+    live = job_service.get_live_job(job_id)
+    if live:
+        live._cancel_event.set()
+
+    job_service.update_job_status(db, job_id, status="cancelled")
     return {"research_id": job_id, "status": "cancelled"}
 
 
@@ -148,9 +176,14 @@ async def cancel_research(job_id: str):
 # Internal helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_session_response(session_id: str) -> SessionResponse:
-    session = get_session(session_id)
-    jobs = get_jobs_for_session(session_id)
+def _auto_title(query: str) -> str:
+    """Derive a session title from the first query (60 chars max)."""
+    return query[:60].rstrip() + ("…" if len(query) > 60 else "")
+
+
+def _build_session_response(db: Session, session_id: str) -> SessionResponse:
+    session = session_service.get_session(db, session_id)
+    jobs = job_service.get_jobs_for_session(db, session_id)
     return SessionResponse(
         session_id=session.id,
         title=session.title,
