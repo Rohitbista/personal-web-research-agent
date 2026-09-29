@@ -19,3 +19,6 @@ class AgentState(TypedDict):
     # Loop guard
     iteration_count: int
     max_iterations: int
+
+    # # Propagated from the originating HTTP request for correlated logging
+    trace_id: str
