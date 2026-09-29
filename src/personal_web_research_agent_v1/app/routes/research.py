@@ -29,7 +29,7 @@ from personal_web_research_agent_v1.services.research_service import run_researc
 from personal_web_research_agent_v1.config.settings import SERVICE_CODE
 from personal_web_research_agent_v1.logging.logger_service import LoggerService
 
-router = APIRouter(prefix="/api/v1", tags=["research"])
+router = APIRouter()
 
 _CTX = "src/app/routes/research"
 

@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware 
 
 from personal_web_research_agent_v1.logging.logger_service import LoggerService
@@ -9,7 +9,7 @@ from personal_web_research_agent_v1.logging.logger_service import LoggerService
 # ── Logging (must be first) ───────────────────────────────────────────
 logger = LoggerService()#level="DEBUG")   # This level is for the debug logs to show up
 
-from personal_web_research_agent_v1.app.routes.research import router as research_router
+from .routes import research, log_viewer_router
 from personal_web_research_agent_v1.database.database import init_db
 
 _CTX = "src/app/server"
@@ -37,13 +37,25 @@ app.add_middleware(
 )
 # ──────────────────────────────────────────────────────────────────────────────
 
+def get_app_state(request: Request): # Dependency: inject app.state into route handlers
+    return request.app.state
+
 @app.get("/")
 def root():
     return {"success": True, "message": "Web Research Agent is up and running"}
 
 
-app.include_router(research_router)
+app.include_router(
+    research.router,
+    prefix="/api/v1",
+    tags=["Research"],
+)
 
+app.include_router(
+    log_viewer_router.router,
+    prefix="/logs", 
+    tags=["Log Viewer"],
+)
 
 def main():
     uvicorn.run(
