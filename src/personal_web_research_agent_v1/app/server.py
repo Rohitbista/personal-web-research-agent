@@ -9,7 +9,7 @@ from personal_web_research_agent_v1.logging.logger_service import LoggerService
 # ── Logging (must be first) ───────────────────────────────────────────
 logger = LoggerService()#level="DEBUG")   # This level is for the debug logs to show up
 
-from .routes import research, log_viewer_router
+from personal_web_research_agent_v1.app.routes import research, log_viewer_router
 from personal_web_research_agent_v1.database.database import init_db
 
 _CTX = "src/app/server"
