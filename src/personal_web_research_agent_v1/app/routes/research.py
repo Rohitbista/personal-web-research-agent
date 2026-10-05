@@ -22,12 +22,18 @@ from personal_web_research_agent_v1.app.models import (
     SessionResponse,
     SessionListResponse,
     RenameSessionRequest,
+    ApproveResearchRequest, 
+    PlanResponse,
 )
 from personal_web_research_agent_v1.database.database import get_db
 from personal_web_research_agent_v1.services import session_service, job_service
 from personal_web_research_agent_v1.services.research_service import run_research_job
 from personal_web_research_agent_v1.config.settings import SERVICE_CODE
 from personal_web_research_agent_v1.logging.logger_service import LoggerService
+from personal_web_research_agent_v1.services.research_service import (
+    run_research_job, resume_research_job, cancel_waiting_job, graph_config,
+)
+from personal_web_research_agent_v1.agents.graph import app as langgraph_app
 
 router = APIRouter()
 
@@ -35,6 +41,7 @@ _CTX = "src/app/routes/research"
 
 logger = LoggerService.get_instance()
 
+MAX_QUERIES = 5
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Session endpoints
@@ -425,10 +432,123 @@ def get_research(job_id: str, db: Session = Depends(get_db)):
             },
         )
 
+@router.get("/research/{job_id}/plan", response_model=PlanResponse)
+def get_plan(job_id: str, db: Session = Depends(get_db)):
+    """Current plan from the checkpoint (use after a page refresh while awaiting approval)."""
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Outgoing response: To get research plan",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id},
+        )
+        record = job_service.get_job_record(db, job_id)
+        if not record:
+            raise HTTPException(404, "Job not found")
+        snapshot = langgraph_app.get_state(graph_config(job_id))
+        queries = snapshot.values.get("research_queries", []) if snapshot else []
+        result = PlanResponse(research_id=job_id, status=record.status, queries=queries)
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Got research plan",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )   
+        return result
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to get research plan",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to get research status",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
+
+
+@router.post("/research/{job_id}/approve", status_code=202)
+async def approve_research(
+    job_id: str,
+    request: ApproveResearchRequest,
+    db: Session = Depends(get_db),
+):
+    """Approve the plan (optionally with edited queries) and resume the research."""
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+
+    try:
+        logger.info(
+            "Incoming request: To approve research",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id},
+        )
+        record = job_service.get_job_record(db, job_id, trace_id=trace_id)
+        if not record:
+            raise HTTPException(404, "Job not found")
+        if record.status != "awaiting_approval":
+            raise HTTPException(409, f"Job is '{record.status}', not awaiting approval")
+
+        live = job_service.get_live_job(job_id, trace_id=trace_id)
+        if not live:
+            raise HTTPException(410, "Server restarted and the paused plan was lost. Start a new research.")
+        if live.status != "awaiting_approval":      # double-click / race guard
+            raise HTTPException(409, "Plan already approved")
+
+        queries = None
+        if request.queries is not None:
+            queries = [q.strip() for q in request.queries if q and q.strip()]
+            if not queries:
+                raise HTTPException(422, "At least one non-empty query is required")
+            if len(queries) > MAX_QUERIES:
+                raise HTTPException(422, f"At most {MAX_QUERIES} queries allowed")
+
+        # No await between the check above and this line, so only one approve wins.
+        live.status = "running"
+        live.task = asyncio.create_task(resume_research_job(live, queries, trace_id=trace_id))
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info("Outgoing response: Successfully approved research", trace_id=trace_id, context=_CTX, data={"job_id": job_id, "response_time_ms": response_time_ms})
+        return {"research_id": job_id, "status": "running"}
+    except HTTPException:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to approve plan",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to approve research",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to cancel research job",
+                        "data": str(e), "response_time_ms": response_time_ms},
+        )
+
 
 @router.post("/research/{job_id}/cancel", status_code=200)
-def cancel_research(job_id: str, db: Session = Depends(get_db)):
-    """Signal the background thread to stop after its current LangGraph chunk."""
+async def cancel_research(job_id: str, db: Session = Depends(get_db)):
+    """Cancel a running job, or reject the plan while awaiting approval."""
     start = time.monotonic()
     trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
     try:
@@ -441,18 +561,17 @@ def cancel_research(job_id: str, db: Session = Depends(get_db)):
         record = job_service.get_job_record(db, job_id, trace_id=trace_id)
         if not record:
             raise HTTPException(status_code=404, detail="Job not found")
-        if record.status not in ("queued", "running"):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Cannot cancel a job in '{record.status}' state",
-            )
-        # Signal the live handle (if the server hasn't restarted)
+        if record.status not in ("queued", "running", "awaiting_approval"):
+            raise HTTPException(409, f"Cannot cancel a job in '{record.status}' state")
+
         live = job_service.get_live_job(job_id, trace_id=trace_id)
         if live:
-            live._cancel_event.set()
+            if live.status == "awaiting_approval":
+                await cancel_waiting_job(live)      # no thread running → close stream here
+            else:
+                live._cancel_event.set()
 
         job_service.update_job_status(db, job_id, status="cancelled", trace_id=trace_id)
-        response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.info(
             "Outgoing response: Cancelled research job",
             trace_id=trace_id,
@@ -460,7 +579,7 @@ def cancel_research(job_id: str, db: Session = Depends(get_db)):
             data={"job_id": job_id, "response_time_ms": response_time_ms},
         )
         return {"research_id": job_id, "status": "cancelled"}
-    except HTTPException as e:
+    except HTTPException:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.warn(
             "Outgoing response: Failed to cancel research job",
@@ -468,7 +587,7 @@ def cancel_research(job_id: str, db: Session = Depends(get_db)):
             context=_CTX,
             data={"job_id": job_id, "detail": e.detail, "response_time_ms": response_time_ms},
         )
-        raise e
+        raise
     except Exception as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.error(
@@ -479,15 +598,10 @@ def cancel_research(job_id: str, db: Session = Depends(get_db)):
             data={"job_id": job_id, "response_time_ms": response_time_ms},
         )
         return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "success": False,
-                "message": "Failed to cancel research job",
-                "data": str(e),
-                "response_time_ms": response_time_ms,
-            },
+            status_code=500,
+            content={"success": False, "message": "Failed to cancel research job",
+                     "data": str(e), "response_time_ms": response_time_ms},
         )
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Internal helpers

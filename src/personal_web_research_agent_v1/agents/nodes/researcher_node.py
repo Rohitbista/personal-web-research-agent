@@ -5,11 +5,11 @@ from langchain_groq import ChatGroq
 from ..state import AgentState
 from ..tools import tools
 from ..prompts.researcher import RESEARCHER_SYSTEM_PROMPT
-from ...config.settings import GROQ_API_KEY, LLM_MODEL
+from ...config.settings import GROQ_API_KEY, LLM_MODEL_RESEARCHER
 from personal_web_research_agent_v1.logging.logger_service import LoggerService
 
 _researcher_llm = ChatGroq(
-    model_name=LLM_MODEL, temperature=0.5, groq_api_key=GROQ_API_KEY
+    model_name=LLM_MODEL_RESEARCHER, temperature=0.5, groq_api_key=GROQ_API_KEY
 ).bind_tools(tools)
 
 logger = LoggerService.get_instance()
@@ -42,7 +42,7 @@ def researcher_node(state: AgentState) -> dict:
 
     messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
     request_payload = {
-        "model": LLM_MODEL,
+        "model": LLM_MODEL_RESEARCHER,
         "temperature": 0.5,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -64,7 +64,7 @@ def researcher_node(state: AgentState) -> dict:
         status=True,
         request=request_payload,
         response={
-            "model":         metadata.get("model_name", LLM_MODEL),
+            "model":         metadata.get("model_name", LLM_MODEL_RESEARCHER),
             "finish_reason": metadata.get("finish_reason", ""),
             "tool_calls":    len(getattr(response, "tool_calls", []) or []),
             "usage": {
