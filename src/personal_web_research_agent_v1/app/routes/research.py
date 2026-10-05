@@ -6,9 +6,13 @@ services layer; this file only handles HTTP concerns.
 """
 
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException
+import time
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import JSONResponse
+import uuid
+from typing import Optional
 
 from personal_web_research_agent_v1.app.models import (
     StartResearchRequest,
@@ -22,8 +26,14 @@ from personal_web_research_agent_v1.app.models import (
 from personal_web_research_agent_v1.database.database import get_db
 from personal_web_research_agent_v1.services import session_service, job_service
 from personal_web_research_agent_v1.services.research_service import run_research_job
+from personal_web_research_agent_v1.config.settings import SERVICE_CODE
+from personal_web_research_agent_v1.logging.logger_service import LoggerService
 
-router = APIRouter(prefix="/api/v1", tags=["research"])
+router = APIRouter()
+
+_CTX = "src/app/routes/research"
+
+logger = LoggerService.get_instance()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -33,19 +43,94 @@ router = APIRouter(prefix="/api/v1", tags=["research"])
 @router.get("/sessions", response_model=SessionListResponse)
 def get_all_sessions(db: Session = Depends(get_db)):
     """List all sessions (newest first) with lightweight research history."""
-    records = session_service.list_sessions(db)
-    return SessionListResponse(
-        sessions=[_build_session_response(db, r.id) for r in records]
-    )
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: To get all sessions",
+            trace_id=trace_id,
+            context=_CTX,
+        )
+        records = session_service.list_sessions(db, trace_id=trace_id)
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Got all sessions",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"records": len(records), "response_time_ms": response_time_ms},
+        )
+        return SessionListResponse(
+            sessions=[_build_session_response(db, r.id, trace_id=trace_id) for r in records]
+        )
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to get sessions",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to get sessions",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            })
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
 def get_session_detail(session_id: str, db: Session = Depends(get_db)):
     """Full detail for one session — title, timestamps, and research history."""
-    if not session_service.get_session(db, session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-    return _build_session_response(db, session_id)
-
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: Getting session detail",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"session_id": session_id},
+        )
+        if not session_service.get_session(db, session_id, trace_id=trace_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        result = _build_session_response(db, session_id, trace_id=trace_id)
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Got session detail",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"session_id": session_id, "response_time_ms": response_time_ms},
+        )
+        return result
+    except HTTPException as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to get session detail",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"session_id": session_id, "detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise e
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to get session detail",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"session_id": session_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to get session",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
 
 @router.patch("/sessions/{session_id}/rename", response_model=SessionResponse)
 def rename_session(
@@ -57,13 +142,57 @@ def rename_session(
     Rename a session's title.
     The title is auto-set from the first query on creation; this overrides it.
     """
-    title = request.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="Title must not be empty")
-    record = session_service.rename_session(db, session_id, title)
-    if not record:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return _build_session_response(db, session_id)
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: Renaming session",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"session_id": session_id, "title": request.title},
+        )
+        title = request.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="Title must not be empty")
+        record = session_service.rename_session(db, session_id, title, trace_id=trace_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Session not found")
+        result = _build_session_response(db, session_id, trace_id=trace_id)
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Renamed session",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"session_id": session_id, "response_time_ms": response_time_ms},
+        )
+        return result
+    except HTTPException as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to rename session",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"session_id": session_id, "detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise e
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to rename session",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"session_id": session_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to rename session",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -82,27 +211,85 @@ async def start_research(
     omitted (or when the supplied id is not found in the DB).
     Returns immediately; research runs in the background.
     """
-    # Resolve or auto-create the session
-    session_id = request.session_id
-    if session_id:
-        existing = session_service.get_session(db, session_id)
-        if not existing:
-            # Client sent an id we don't know — treat as new session
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: Start research job",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"query": request.query, "session_id": request.session_id},
+        )
+        session_id = request.session_id
+        if session_id:
+            existing = session_service.get_session(db, session_id, trace_id=trace_id)
+            if not existing:
+                # Client sent an id we don't know — treat as new session
+                title = _auto_title(request.query)
+                session_service.create_session(
+                    db,
+                    title=title,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                )
+        else:
             title = _auto_title(request.query)
-            session_service.create_session(db, title=title, session_id=session_id)
-    else:
-        title = _auto_title(request.query)
-        sess = session_service.create_session(db, title=title)
-        session_id = sess.id
+            sess = session_service.create_session(db, title=title, trace_id=trace_id)
+            session_id = sess.id
 
-    job = job_service.create_job(db, query=request.query, session_id=session_id)
-    job.task = asyncio.create_task(run_research_job(job))
+        job = job_service.create_job(
+            db,
+            query=request.query,
+            session_id=session_id,
+            trace_id=trace_id,
+        )
+        # trace_id flows into the background task so every node log shares it
+        job.task = asyncio.create_task(run_research_job(job, trace_id=trace_id))
 
-    return StartResearchResponse(
-        research_id=job.id,
-        session_id=job.session_id,
-        status=job.status,
-    )
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Started research job",
+            trace_id=trace_id,
+            context=_CTX,
+            data={
+                "research_id": job.id,
+                "session_id": job.session_id,
+                "status": job.status,
+                "response_time_ms": response_time_ms,
+            },
+        )
+        return StartResearchResponse(
+            research_id=job.id,
+            session_id=job.session_id,
+            status=job.status,
+        )
+    except HTTPException as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to start research job",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise e
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to start research job",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to start research job",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
 
 
 @router.get("/research/{job_id}/stream")
@@ -115,21 +302,64 @@ async def stream_research(job_id: str):
     Note: uses the in-memory live handle (not the DB) because the Queue
     and asyncio primitives cannot be stored in SQLite.
     """
-    job = job_service.get_live_job(job_id)
-    if not job:
-        raise HTTPException(
-            status_code=404,
-            detail="Job not found or server was restarted (SSE unavailable for past jobs)",
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: Stream research progress",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id},
         )
+        job = job_service.get_live_job(job_id, trace_id=trace_id)
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail="Job not found or server was restarted (SSE unavailable for past jobs)",
+            )
 
-    async def _event_generator():
-        while True:
-            payload = await job.events.get()
-            if payload is None:      # sentinel → close the stream
-                break
-            yield {"data": payload}
+        async def _event_generator():
+            while True:
+                payload = await job.events.get()
+                if payload is None:      # sentinel → close the stream
+                    break
+                yield {"data": payload}
 
-    return EventSourceResponse(_event_generator())
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Started research SSE stream",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return EventSourceResponse(_event_generator())
+    except HTTPException as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to stream research",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise e
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to stream research",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to stream research",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
 
 
 @router.get("/research/{job_id}", response_model=ResearchStatusResponse)
@@ -138,38 +368,125 @@ def get_research(job_id: str, db: Session = Depends(get_db)):
     Poll job status.  When ``status == 'completed'`` the ``report`` field is populated.
     This reads from the DB so it works even after a server restart.
     """
-    record = job_service.get_job_record(db, job_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return ResearchStatusResponse(
-        research_id=record.id,
-        session_id=record.session_id,
-        status=record.status,
-        query=record.query,
-        report=record.report,
-        error=record.error,
-        created_at=record.created_at,
-    )
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: Get research status",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id},
+        )
+        record = job_service.get_job_record(db, job_id, trace_id=trace_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Got research status",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "status": record.status, "response_time_ms": response_time_ms},
+        )
+        return ResearchStatusResponse(
+            research_id=record.id,
+            session_id=record.session_id,
+            status=record.status,
+            query=record.query,
+            report=record.report,
+            error=record.error,
+            created_at=record.created_at,
+        )
+    except HTTPException as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to get research status",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise e
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to get research status",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to get research status",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
 
 
 @router.post("/research/{job_id}/cancel", status_code=200)
 def cancel_research(job_id: str, db: Session = Depends(get_db)):
     """Signal the background thread to stop after its current LangGraph chunk."""
-    record = job_service.get_job_record(db, job_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if record.status not in ("queued", "running"):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot cancel a job in '{record.status}' state",
+    start = time.monotonic()
+    trace_id = f"{SERVICE_CODE}-{uuid.uuid4()}"
+    try:
+        logger.info(
+            "Incoming request: Cancel research job",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id},
         )
-    # Signal the live handle (if the server hasn't restarted)
-    live = job_service.get_live_job(job_id)
-    if live:
-        live._cancel_event.set()
+        record = job_service.get_job_record(db, job_id, trace_id=trace_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if record.status not in ("queued", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot cancel a job in '{record.status}' state",
+            )
+        # Signal the live handle (if the server hasn't restarted)
+        live = job_service.get_live_job(job_id, trace_id=trace_id)
+        if live:
+            live._cancel_event.set()
 
-    job_service.update_job_status(db, job_id, status="cancelled")
-    return {"research_id": job_id, "status": "cancelled"}
+        job_service.update_job_status(db, job_id, status="cancelled", trace_id=trace_id)
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.info(
+            "Outgoing response: Cancelled research job",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return {"research_id": job_id, "status": "cancelled"}
+    except HTTPException as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.warn(
+            "Outgoing response: Failed to cancel research job",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id, "detail": e.detail, "response_time_ms": response_time_ms},
+        )
+        raise e
+    except Exception as e:
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
+        logger.error(
+            "Outgoing response: Failed to cancel research job",
+            trace_id=trace_id,
+            context=_CTX,
+            error=e,
+            data={"job_id": job_id, "response_time_ms": response_time_ms},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Failed to cancel research job",
+                "data": str(e),
+                "response_time_ms": response_time_ms,
+            },
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -181,9 +498,13 @@ def _auto_title(query: str) -> str:
     return query[:60].rstrip() + ("…" if len(query) > 60 else "")
 
 
-def _build_session_response(db: Session, session_id: str) -> SessionResponse:
-    session = session_service.get_session(db, session_id)
-    jobs = job_service.get_jobs_for_session(db, session_id)
+def _build_session_response(
+    db: Session,
+    session_id: str,
+    trace_id: Optional[str] = None,
+) -> SessionResponse:
+    session = session_service.get_session(db, session_id, trace_id=trace_id)
+    jobs = job_service.get_jobs_for_session(db, session_id, trace_id=trace_id)
     return SessionResponse(
         session_id=session.id,
         title=session.title,

@@ -1,15 +1,7 @@
 """
 services/job_service.py
 ────────────────────────
-Manages the two parallel representations of a research job:
-
-  1. ResearchJobRecord  — the SQLite row (persistent fields only)
-  2. ResearchJob        — the in-memory dataclass (asyncio.Queue, threading.Event,
-                          asyncio.Task) that can never be serialised
-
-The in-memory registry (_live_jobs) is intentionally process-local.
-If you move to multi-worker deployments, replace it with a distributed
-queue (e.g. Redis Streams) and keep only the DB for state.
+Manages the two parallel representations of a research job.
 """
 
 import uuid
@@ -19,28 +11,31 @@ from sqlalchemy.orm import Session as DBSession
 
 from personal_web_research_agent_v1.app.models import ResearchJob
 from personal_web_research_agent_v1.database.models import ResearchJobRecord, SessionRecord
+from personal_web_research_agent_v1.logging.logger_service import LoggerService
 
-# ── In-memory registry for live SSE handles ───────────────────────────────────
-# Keyed by job id.  Populated when a job is created, never persisted.
+logger = LoggerService.get_instance()
+
+_CTX = "src/services/job_service"
+
 _live_jobs: dict[str, ResearchJob] = {}
 
-
-# ── Public API ────────────────────────────────────────────────────────────────
 
 def create_job(
     db: DBSession,
     *,
     query: str,
     session_id: str,
+    trace_id: Optional[str] = None,
 ) -> ResearchJob:
-    """
-    Persist a new job row and register a live handle.
-
-    The caller is responsible for ensuring the session already exists in the DB.
-    """
     job_id = f"research-job-{str(uuid.uuid4())}"
 
-    # 1. Persist to SQLite
+    logger.info(
+        "Creating research job",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id, "session_id": session_id, "query": query},
+    )
+
     record = ResearchJobRecord(
         id=job_id,
         session_id=session_id,
@@ -50,24 +45,57 @@ def create_job(
     db.add(record)
     db.commit()
 
-    # 2. Build the in-memory live handle (Queue, Event, Task are not DB-safe)
     live = ResearchJob(id=job_id, query=query, session_id=session_id)
     _live_jobs[job_id] = live
 
+    logger.info(
+        "Research job created and registered",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id, "status": "queued"},
+    )
     return live
 
 
-def get_live_job(job_id: str) -> Optional[ResearchJob]:
-    """
-    Return the in-memory handle for SSE streaming / cancellation.
-    Returns None if the server was restarted and the handle is gone.
-    """
-    return _live_jobs.get(job_id)
+def get_live_job(
+    job_id: str,
+    trace_id: Optional[str] = None,
+) -> Optional[ResearchJob]:
+    logger.info(
+        "Fetching live job handle",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id},
+    )
+    job = _live_jobs.get(job_id)
+    logger.info(
+        "Live job handle fetch result",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id, "found": job is not None},
+    )
+    return job
 
 
-def get_job_record(db: DBSession, job_id: str) -> Optional[ResearchJobRecord]:
-    """Return the persisted DB row for a job (used for status polling)."""
-    return db.get(ResearchJobRecord, job_id)
+def get_job_record(
+    db: DBSession,
+    job_id: str,
+    trace_id: Optional[str] = None,
+) -> Optional[ResearchJobRecord]:
+    logger.info(
+        "Fetching job record",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id},
+    )
+    record = db.get(ResearchJobRecord, job_id)
+    logger.info(
+        "Job record fetch result",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id, "found": record is not None},
+    )
+    return record
 
 
 def update_job_status(
@@ -77,13 +105,27 @@ def update_job_status(
     status: str,
     report: Optional[str] = None,
     error: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> None:
-    """
-    Write status / report / error back to SQLite.
-    Called by research_service as the LangGraph job progresses.
-    """
+    logger.info(
+        "Updating job status",
+        trace_id=trace_id,
+        context=_CTX,
+        data={
+            "job_id": job_id,
+            "status": status,
+            "has_report": report is not None,
+            "has_error": error is not None,
+        },
+    )
     record = db.get(ResearchJobRecord, job_id)
     if not record:
+        logger.info(
+            "Update skipped — job record not found",
+            trace_id=trace_id,
+            context=_CTX,
+            data={"job_id": job_id},
+        )
         return
     record.status = status
     if report is not None:
@@ -91,15 +133,36 @@ def update_job_status(
     if error is not None:
         record.error = error
     db.commit()
+    logger.info(
+        "Job status updated",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"job_id": job_id, "status": status},
+    )
 
 
 def get_jobs_for_session(
-    db: DBSession, session_id: str
+    db: DBSession,
+    session_id: str,
+    trace_id: Optional[str] = None,
 ) -> list[ResearchJobRecord]:
     """Return all job rows for a session, in creation order."""
-    return (
+    logger.info(
+        "Fetching jobs for session",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"session_id": session_id},
+    )
+    records = (
         db.query(ResearchJobRecord)
         .filter(ResearchJobRecord.session_id == session_id)
         .order_by(ResearchJobRecord.created_at)
         .all()
     )
+    logger.info(
+        "Jobs for session fetched",
+        trace_id=trace_id,
+        context=_CTX,
+        data={"session_id": session_id, "count": len(records)},
+    )
+    return records

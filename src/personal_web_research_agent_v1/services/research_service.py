@@ -7,6 +7,7 @@ and persists every status transition back to SQLite via job_service.
 
 import asyncio
 import json
+from typing import Optional
 
 from personal_web_research_agent_v1.agents.graph import app as langgraph_app
 from personal_web_research_agent_v1.app.models import ResearchJob
@@ -14,7 +15,7 @@ from personal_web_research_agent_v1.database.database import SessionLocal
 from personal_web_research_agent_v1.services import job_service
 
 
-async def run_research_job(job: ResearchJob) -> None:
+async def run_research_job(job: ResearchJob, trace_id: Optional[str] = None) -> None:
     """
     Runs the LangGraph graph inside a thread (it's synchronous) and
     emits SSE events back to the async event loop via the job's Queue.
@@ -32,7 +33,7 @@ async def run_research_job(job: ResearchJob) -> None:
         asyncio.run_coroutine_threadsafe(job.events.put(payload), loop)
 
     def _run() -> None:
-        inputs = {"messages": [("user", job.query)]}
+        inputs = {"messages": [("user", job.query)], "trace_id": trace_id,}    # Inject in the agent state throgh here
         config = {"recursion_limit": 25}
 
         try:
