@@ -54,6 +54,14 @@ class SessionListResponse(BaseModel):
 class RenameSessionRequest(BaseModel):
     title: str
 
+class ApproveResearchRequest(BaseModel):
+    queries: Optional[List[str]] = None   # None → approve the plan unchanged
+
+class PlanResponse(BaseModel):
+    research_id: str
+    status: str
+    queries: List[str]
+
 
 # ── Internal state (not sent over the wire directly) ─────────────────────────
 

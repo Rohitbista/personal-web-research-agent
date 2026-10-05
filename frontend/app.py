@@ -4,18 +4,27 @@ frontend/app.py
 Streamlit UI for the Personal Web Research Agent.
 Connects to the FastAPI backend running on localhost:8000.
 
+Flow (human-in-the-loop)
+────────────────────────
+1. User submits a query            → POST /research
+2. Planner runs, graph pauses      → status "awaiting_approval", SSE "plan_ready"
+3. UI shows the plan in an editor  → user edits / adds / removes queries
+4. User clicks "Approve"           → POST /research/{id}/approve  (edited queries optional)
+5. Research resumes, SSE continues → searching / fetching / completed
+   (or "Reject" → POST /research/{id}/cancel)
+
 Performance notes
 ─────────────────
 • Completed jobs are cached for 1 hour  — the report never changes once done.
 • Session list is cached for 30 s       — avoids re-fetching on every rerun.
 • Session detail is cached for 15 s     — titles / history change rarely.
-• Active (running/queued) jobs are never cached so SSE + polling stay live.
-• The sidebar no longer fires a separate /sessions call when the cache is warm.
+• Active (running/queued/awaiting) jobs are never cached so SSE + polling stay live.
 """
 
 import json
 import time
 
+import pandas as pd
 import requests
 import sseclient
 import streamlit as st
@@ -23,6 +32,7 @@ import streamlit as st
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 BASE_URL = "http://localhost:8000/api/v1"
+MAX_QUERIES = 5   # keep in sync with MAX_QUERIES in the backend route
 
 st.set_page_config(
     page_title="Web Research Agent",
@@ -100,8 +110,9 @@ def _cached_session_detail(session_id: str) -> dict | None:
 def _cached_completed_job(job_id: str) -> dict | None:
     """
     Fetch a job and cache it for 1 hour — but ONLY when it has reached a
-    terminal state (completed / failed / cancelled).  Active jobs are
-    intentionally not cached so live polling keeps working.
+    terminal state (completed / failed / cancelled).  Active jobs
+    (queued / running / awaiting_approval) are intentionally not cached so
+    live polling keeps working.
     """
     try:
         r = requests.get(f"{BASE_URL}/research/{job_id}", timeout=10)
@@ -126,8 +137,10 @@ def _init_state():
     defaults = {
         "active_session_id": None,
         "active_job_id": None,
-        "streaming_log": [],   # SSE lines for the current job
+        "streaming_log": [],        # SSE lines for the current job
         "job_status": None,
+        "plan_cache": {},           # job_id → list[str]  (plan as sent by the planner)
+        "plan_editor_version": {},  # job_id → int  (bump to reset the editor widget)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -135,6 +148,15 @@ def _init_state():
 
 
 _init_state()
+
+STATUS_EMOJI = {
+    "completed": "✅",
+    "failed": "❌",
+    "cancelled": "🚫",
+    "running": "⏳",
+    "queued": "🕐",
+    "awaiting_approval": "⏸️",
+}
 
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -213,13 +235,7 @@ def render_main():
         if history:
             with st.expander(f"📜 History ({len(history)} jobs)", expanded=False):
                 for job in reversed(history):
-                    status_emoji = {
-                        "completed": "✅",
-                        "failed": "❌",
-                        "cancelled": "🚫",
-                        "running": "⏳",
-                        "queued": "🕐",
-                    }.get(job["status"], "❓")
+                    status_emoji = STATUS_EMOJI.get(job["status"], "❓")
                     if st.button(
                         f"{status_emoji} {job['query'][:70]}",
                         key=f"job_{job['research_id']}",
@@ -237,7 +253,8 @@ def render_main():
     else:
         # ── New session ───────────────────────────────────────────────────────
         st.header("New Research")
-        st.markdown("Ask anything — the agent will search the web and compile a report for you.")
+        st.markdown("Ask anything — the agent will draft a research plan for your approval, "
+                    "then search the web and compile a report.")
         _render_query_form(session_id=None)
 
     st.divider()
@@ -290,7 +307,11 @@ def _render_job(job_id: str):
     st.subheader(f"📋 {data['query']}")
     st.caption(f"Job ID: `{job_id}`  ·  Status: **{status}**")
 
-    # Cancel button while running
+    # ── Human-in-the-loop: review / edit / approve the plan ───────────────────
+    if status == "awaiting_approval":
+        _render_plan_review(job_id)
+
+    # Cancel button while queued / running
     if status in ("queued", "running"):
         if st.button("🛑 Cancel", key="cancel_btn"):
             api_post(f"/research/{job_id}/cancel")
@@ -298,15 +319,14 @@ def _render_job(job_id: str):
             _cached_completed_job.clear()
             st.rerun()
 
-    # ── SSE live stream (only for active jobs) ────────────────────────────────
+    # ── SSE live stream (only while the backend is actually working) ──────────
     if status in ("queued", "running"):
         _stream_events(job_id)
 
-        # Poll until done, then refresh
-        with st.spinner("Researching… (page auto-refreshes when done)"):
+        # Poll until done (or until the plan is ready for review), then refresh
+        with st.spinner("Working… (page auto-refreshes when done or when your approval is needed)"):
             _poll_until_done(job_id)
 
-        # Job just finished — bust the session cache so history updates
         _invalidate_session_cache()
         st.rerun()
 
@@ -336,11 +356,132 @@ def _render_job(job_id: str):
         st.warning("Research was cancelled.")
 
 
+# ─── Plan review (human-in-the-loop) ──────────────────────────────────────────
+
+def _clean_queries(values) -> list[str]:
+    """Drop blank / NaN rows the data editor may produce, strip whitespace."""
+    return [v.strip() for v in values if isinstance(v, str) and v.strip()]
+
+
+def _render_plan_review(job_id: str):
+    """
+    Show the planner's sub-queries in an editable table.
+    The user can edit cells, add rows, delete rows, then approve or reject.
+    """
+    # The plan normally arrives via the SSE "plan_ready" event; if the page was
+    # refreshed (or the job was opened from History) fetch it from the backend.
+    if job_id not in st.session_state.plan_cache:
+        plan = api_get(f"/research/{job_id}/plan")
+        if plan is None:
+            return
+        st.session_state.plan_cache[job_id] = _clean_queries(plan.get("queries", []))
+
+    original: list[str] = st.session_state.plan_cache[job_id]
+    version = st.session_state.plan_editor_version.get(job_id, 0)
+
+    st.markdown("### 📝 Research plan — your approval needed")
+    st.caption(
+        f"Edit any query by double-clicking it. Add a query with the empty row at the bottom "
+        f"(＋), or delete rows by selecting them and pressing the 🗑 icon. "
+        f"Max {MAX_QUERIES} queries."
+    )
+
+    edited_df = st.data_editor(
+        pd.DataFrame({"Query": original}),
+        key=f"plan_editor_{job_id}_{version}",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Query": st.column_config.TextColumn("Search query", width="large"),
+        },
+    )
+    edited = _clean_queries(edited_df["Query"].tolist())
+    modified = edited != original
+
+    # ── Validation ────────────────────────────────────────────────────────────
+    valid = True
+    if not edited:
+        st.warning("The plan needs at least one query.")
+        valid = False
+    elif len(edited) > MAX_QUERIES:
+        st.warning(f"Too many queries ({len(edited)}). Please keep it to {MAX_QUERIES} or fewer.")
+        valid = False
+    elif modified:
+        st.info(f"✏️ You've modified the plan — {len(edited)} queries will be used.")
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+    col_approve, col_reset, col_reject, _ = st.columns([2, 1, 1, 2])
+
+    if col_approve.button(
+        "✅ Approve & continue",
+        type="primary",
+        disabled=not valid,
+        use_container_width=True,
+        key=f"approve_{job_id}",
+    ):
+        # Omit `queries` to approve exactly what the planner produced.
+        body = {"queries": edited} if modified else {}
+        result = api_post(f"/research/{job_id}/approve", json_body=body)
+        if result:
+            st.session_state.streaming_log.append(
+                f"✅ [approved] Plan approved with {len(edited)} queries"
+                + (" (edited)" if modified else "")
+            )
+            st.session_state.plan_cache.pop(job_id, None)
+            st.session_state.job_status = "running"
+            _invalidate_session_cache()
+            st.rerun()
+
+    if col_reset.button(
+        "↺ Reset",
+        disabled=not modified,
+        use_container_width=True,
+        key=f"reset_{job_id}",
+    ):
+        st.session_state.plan_editor_version[job_id] = version + 1
+        st.rerun()
+
+    if col_reject.button(
+        "🚫 Reject",
+        use_container_width=True,
+        key=f"reject_{job_id}",
+    ):
+        result = api_post(f"/research/{job_id}/cancel")
+        if result:
+            st.session_state.plan_cache.pop(job_id, None)
+            _cached_completed_job.clear()
+            _invalidate_session_cache()
+            st.rerun()
+
+    st.divider()
+
+
+# ─── SSE + polling ────────────────────────────────────────────────────────────
+
+_EVENT_EMOJI = {
+    "plan_ready": "📝",
+    "plan_updated": "✏️",
+    "searching": "🔍",
+    "fetching": "📥",
+    "tool_done": "🛠️",
+    "thinking": "🧠",
+    "writing": "✍️",
+    "completed": "✅",
+    "cancelled": "🚫",
+    "error": "❌",
+}
+
+# Events after which we stop reading the stream:
+#   plan_ready → backend is paused waiting for the human (stream stays open server-side)
+_STOP_EVENTS = ("completed", "error", "cancelled", "plan_ready")
+
+
 def _stream_events(job_id: str):
     """
     Consume the SSE stream for *this* job and store lines in session state.
-    Stops after seeing a terminal event or 50 events, whichever comes first,
-    so Streamlit's script runner is never blocked for long.
+    Stops after a terminal event, a `plan_ready` pause, or 50 events,
+    whichever comes first, so Streamlit's script runner is never blocked.
     """
     log = st.session_state.streaming_log
     placeholder = st.empty()
@@ -353,41 +494,46 @@ def _stream_events(job_id: str):
         ) as resp:
             client = sseclient.SSEClient(resp)
             for i, event in enumerate(client.events()):
-                if event.data:
-                    try:
-                        payload = json.loads(event.data)
-                        msg_type = payload.get("type", "info")
-                        msg_data = payload.get("data", event.data)
-                    except json.JSONDecodeError:
-                        msg_type = "info"
-                        msg_data = event.data
+                if not event.data:
+                    continue
 
-                    emoji = {
-                        "searching": "🔍",
-                        "fetching": "📥",
-                        "thinking": "🧠",
-                        "writing": "✍️",
-                        "completed": "✅",
-                        "error": "❌",
-                    }.get(msg_type, "▸")
+                try:
+                    payload = json.loads(event.data)
+                    msg_type = payload.get("type", "info")
+                    msg_data = payload.get("data", event.data)
+                except json.JSONDecodeError:
+                    msg_type = "info"
+                    msg_data = event.data
 
-                    line = f"{emoji} [{msg_type}] {msg_data}"
-                    log.append(line)
-                    placeholder.text(line)
+                # Remember the plan so the editor doesn't need another request
+                if msg_type == "plan_ready" and isinstance(msg_data, list):
+                    st.session_state.plan_cache[job_id] = _clean_queries(msg_data)
+                    msg_data = f"{len(msg_data)} queries drafted — waiting for your approval"
+                elif msg_type == "plan_updated" and isinstance(msg_data, list):
+                    msg_data = f"Using your edited plan ({len(msg_data)} queries)"
 
-                    if msg_type in ("completed", "error") or i >= 50:
-                        break
+                emoji = _EVENT_EMOJI.get(msg_type, "▸")
+                line = f"{emoji} [{msg_type}] {msg_data}"
+                log.append(line)
+                placeholder.text(line)
+
+                if msg_type in _STOP_EVENTS or i >= 50:
+                    break
     except Exception:
         # Stream not available (server restarted, etc.) — fall through to polling
         pass
 
 
 def _poll_until_done(job_id: str, max_wait: int = 300):
-    """Poll /research/{job_id} every 3 s until terminal state or timeout."""
+    """
+    Poll /research/{job_id} every 3 s until the job is terminal, paused for
+    approval, or the timeout is hit.
+    """
+    stop_states = ("completed", "failed", "cancelled", "awaiting_approval")
     deadline = time.time() + max_wait
     while time.time() < deadline:
         data = api_get(f"/research/{job_id}")
-        if data and data["status"] in ("completed", "failed", "cancelled"):
+        if data and data["status"] in stop_states:
             return
         time.sleep(3)
 

@@ -7,22 +7,12 @@ by AppLogger.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 from personal_web_research_agent_v1.config.settings import ENV, SERVICE_CODE
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-def _nepal_now() -> str:
-    # Nepal is 5 hours and 45 minutes ahead of UTC
-    nepal_tz = timezone(timedelta(hours=5, minutes=45))
-    return datetime.now(nepal_tz).isoformat()
-
+from personal_web_research_agent_v1.config.nepal_time import _nepal_now
 
 # ---------------------------------------------------------------------------
 # AppLogger schema  (internal application events)
