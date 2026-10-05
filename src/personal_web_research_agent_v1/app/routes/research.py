@@ -471,7 +471,7 @@ def get_plan(job_id: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "success": False,
-                "message": "Failed to get research status",
+                "message": "Failed to get research plan",
                 "data": str(e),
                 "response_time_ms": response_time_ms,
             },
@@ -490,7 +490,7 @@ async def approve_research(
 
     try:
         logger.info(
-            "Incoming request: To approve research",
+            "Incoming request: To approve research plan",
             trace_id=trace_id,
             context=_CTX,
             data={"job_id": job_id},
@@ -519,12 +519,12 @@ async def approve_research(
         live.status = "running"
         live.task = asyncio.create_task(resume_research_job(live, queries, trace_id=trace_id))
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
-        logger.info("Outgoing response: Successfully approved research", trace_id=trace_id, context=_CTX, data={"job_id": job_id, "response_time_ms": response_time_ms})
+        logger.info("Outgoing response: Successfully approved research plan", trace_id=trace_id, context=_CTX, data={"job_id": job_id, "response_time_ms": response_time_ms})
         return {"research_id": job_id, "status": "running"}
-    except HTTPException:
+    except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.warn(
-            "Outgoing response: Failed to approve plan",
+            "Outgoing response: Failed to approve research plan",
             trace_id=trace_id,
             context=_CTX,
             data={"job_id": job_id, "detail": e.detail, "response_time_ms": response_time_ms},
@@ -533,7 +533,7 @@ async def approve_research(
     except Exception as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.error(
-            "Outgoing response: Failed to approve research",
+            "Outgoing response: Failed to approve research plan",
             trace_id=trace_id,
             context=_CTX,
             error=e,
@@ -541,7 +541,7 @@ async def approve_research(
         )
         return JSONResponse(
             status_code=500,
-            content={"success": False, "message": "Failed to cancel research job",
+            content={"success": False, "message": "Failed to approve research plan",
                         "data": str(e), "response_time_ms": response_time_ms},
         )
 
@@ -572,6 +572,7 @@ async def cancel_research(job_id: str, db: Session = Depends(get_db)):
                 live._cancel_event.set()
 
         job_service.update_job_status(db, job_id, status="cancelled", trace_id=trace_id)
+        response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.info(
             "Outgoing response: Cancelled research job",
             trace_id=trace_id,
@@ -579,7 +580,7 @@ async def cancel_research(job_id: str, db: Session = Depends(get_db)):
             data={"job_id": job_id, "response_time_ms": response_time_ms},
         )
         return {"research_id": job_id, "status": "cancelled"}
-    except HTTPException:
+    except HTTPException as e:
         response_time_ms = round((time.monotonic() - start) * 1000, 2)
         logger.warn(
             "Outgoing response: Failed to cancel research job",
