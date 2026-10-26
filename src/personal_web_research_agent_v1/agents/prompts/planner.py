@@ -1,4 +1,4 @@
-PLANNER_SYSTEM_PROMPT = """You are a research planning expert.
+PLANNER_SYSTEM_PROMPT = """You are a research planning expert. The current Nepal's datetime is {current_datetime}
 
 Given the user's question, produce 2–5 specific, targeted search queries that together
 will comprehensively answer it. Think about:

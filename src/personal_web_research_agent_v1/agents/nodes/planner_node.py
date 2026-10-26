@@ -5,10 +5,11 @@ from langchain_groq import ChatGroq
 
 from ..state import AgentState
 from ..prompts.planner import PLANNER_SYSTEM_PROMPT
-from ...config.settings import GROQ_API_KEY, LLM_MODEL
+from ...config.settings import GROQ_API_KEY, LLM_MODEL_PLANNER
+from ...config.nepal_time import _nepal_now
 from personal_web_research_agent_v1.logging.logger_service import LoggerService
 
-_planner_llm = ChatGroq(model_name=LLM_MODEL, temperature=0.2, groq_api_key=GROQ_API_KEY)
+_planner_llm = ChatGroq(model_name=LLM_MODEL_PLANNER, temperature=0.2, groq_api_key=GROQ_API_KEY)
 
 logger = LoggerService.get_instance()
 _CTX = "src/agents/nodes/planner_node"
@@ -26,16 +27,20 @@ def planner_node(state: AgentState) -> dict:
 
     original_query = state["messages"][-1].content
 
+    system_prompt = PLANNER_SYSTEM_PROMPT.format(
+        current_datetime=_nepal_now
+    )
+
     # Build request payload before the call so it can be logged
     messages = [
-        SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=f"Research question: {original_query}"),
     ]
     request_payload = {
-        "model": LLM_MODEL,
+        "model": LLM_MODEL_PLANNER,
         "temperature": 0.2,
         "messages": [
-            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user",   "content": f"Research question: {original_query}"},
         ],
     }
@@ -53,7 +58,7 @@ def planner_node(state: AgentState) -> dict:
         status=True,
         request=request_payload,
         response={
-            "model":         metadata.get("model_name", LLM_MODEL),
+            "model":         metadata.get("model_name", LLM_MODEL_PLANNER),
             "finish_reason": metadata.get("finish_reason", ""),
             "usage": {
                 "prompt_tokens":     usage.get("prompt_tokens", 0),

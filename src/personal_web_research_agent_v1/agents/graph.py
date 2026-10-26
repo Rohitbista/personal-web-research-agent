@@ -1,4 +1,5 @@
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from personal_web_research_agent_v1.agents.state import AgentState
 from personal_web_research_agent_v1.agents.nodes import planner_node, researcher_node, synthesizer_node, tools_node          # ToolNode unchanged
@@ -24,4 +25,10 @@ graph.add_conditional_edges(
 graph.add_edge("tools_node",       "researcher_node")
 graph.add_edge("synthesizer_node", END)
 
-app = graph.compile()
+# 2. Instantiate memory to keep track of the paused state within threads
+memory = MemorySaver()
+
+app = graph.compile(
+    checkpointer=memory,
+    interrupt_after=["planner_node"]  # Intercepts flow right after planner_node executes
+)

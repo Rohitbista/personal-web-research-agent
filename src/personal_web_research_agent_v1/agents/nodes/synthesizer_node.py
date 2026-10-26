@@ -4,11 +4,11 @@ from langchain_groq import ChatGroq
 
 from ..state import AgentState
 from ..prompts.synthesizer import SYNTHESIZER_SYSTEM_PROMPT
-from ...config.settings import GROQ_API_KEY, LLM_MODEL
+from ...config.settings import GROQ_API_KEY, LLM_MODEL_SYNTHESIZER
 from personal_web_research_agent_v1.logging.logger_service import LoggerService
 
 _synthesizer_llm = ChatGroq(
-    model_name=LLM_MODEL, temperature=0.3, groq_api_key=GROQ_API_KEY
+    model_name=LLM_MODEL_SYNTHESIZER, temperature=0.3, groq_api_key=GROQ_API_KEY
 )
 # NOTE: no .bind_tools() here — and we must never pass tool_call messages to it
 
@@ -71,7 +71,7 @@ def synthesizer_node(state: AgentState) -> dict:
     )
 
     request_payload = {
-        "model": LLM_MODEL,
+        "model": LLM_MODEL_SYNTHESIZER,
         "temperature": 0.3,
         "messages": [
             {"role": "system", "content": SYNTHESIZER_SYSTEM_PROMPT},
@@ -94,7 +94,7 @@ def synthesizer_node(state: AgentState) -> dict:
         status=True,
         request=request_payload,
         response={
-            "model":         metadata.get("model_name", LLM_MODEL),
+            "model":         metadata.get("model_name", LLM_MODEL_SYNTHESIZER),
             "finish_reason": metadata.get("finish_reason", ""),
             "usage": {
                 "prompt_tokens":     usage.get("prompt_tokens", 0),
