@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Log Viewer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+      font-size: 13px;
+      background: #0f1117;
+      color: #c9d1d9;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 15px; color: #e6edf3; font-weight: 600; letter-spacing: .5px; }
+    .badge {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 20px;
+      padding: 2px 10px;
+      font-size: 11px;
+      color: #8b949e;
+    }
+
+    /* ── Filter bar ── */
+    .filter-bar {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 10px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .filter-group { display: flex; flex-direction: column; gap: 3px; }
+    .filter-group label { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+    .filter-bar input,
+    .filter-bar select {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #c9d1d9;
+      font-family: inherit;
+      font-size: 12px;
+      padding: 5px 8px;
+      height: 30px;
+    }
+    .filter-bar input:focus,
+    .filter-bar select:focus { outline: none; border-color: #58a6ff; }
+    .filter-bar input[name="search"] { width: 200px; }
+    .filter-bar input[name="trace_id"] { width: 200px; }
+    .filter-bar input[name="date"] { width: 130px; }
+    .filter-bar input[name="limit"] { width: 70px; }
+    .btn {
+      height: 30px;
+      padding: 0 14px;
+      background: #238636;
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 12px;
+      cursor: pointer;
+      align-self: flex-end;
+    }
+    .btn:hover { background: #2ea043; }
+    .btn-reset {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+    }
+    .btn-reset:hover { background: #30363d; }
+
+    /* ── Error / empty notice ── */
+    .notice {
+      margin: 12px 20px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .notice.warn  { background: #2d2000; border: 1px solid #bb8009; color: #e3b341; }
+    .notice.empty { background: #161b22; border: 1px solid #30363d; color: #8b949e; }
+
+    /* ── Table ── */
+    .table-wrap { overflow-x: auto; padding: 0 20px 20px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+
+    /* Fixed column widths — add up to 100% */
+    col.col-ts      { width: 180px; }
+    col.col-level   { width: 64px; }
+    col.col-context { width: 300px; }
+    col.col-trace   { width: 300px; }
+    col.col-msg     { width: auto; }  /* fills remaining space */
+    col.col-data    { width: 180px; } 
+
+    th {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      color: #8b949e;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      padding: 8px 10px;
+      text-align: left;
+      text-transform: uppercase;
+      white-space: nowrap;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Data row */
+    tr.data-row {
+      cursor: pointer;
+    }
+    tr.data-row:hover td { background: #161b22; }
+    tr.data-row.expanded td { background: #161b22; border-bottom: none; }
+
+    td {
+      border-bottom: 1px solid #21262d;
+      padding: 6px 10px;
+      vertical-align: middle;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* ── Expand indicator on the row ── */
+    td.col-ts-cell {
+      color: #8b949e;
+      position: relative;
+      padding-left: 22px;
+    }
+    td.col-ts-cell::before {
+      content: "▶";
+      position: absolute;
+      left: 6px;
+      font-size: 9px;
+      color: #444d56;
+      transition: transform 0.15s;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    tr.expanded td.col-ts-cell::before {
+      transform: translateY(-50%) rotate(90deg);
+      color: #58a6ff;
+    }
+
+    /* ── Expanded detail row ── */
+    tr.detail-row { display: none; }
+    tr.detail-row.visible { display: table-row; }
+    tr.detail-row td {
+      background: #0d1117;
+      border-bottom: 1px solid #30363d;
+      border-top: none;
+      padding: 0;
+      white-space: normal;
+      overflow: visible;
+    }
+
+    .detail-panel {
+      padding: 12px 16px 16px 28px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 12px;
+      align-items: start;   /* prevent grid rows from stretching cells tall */
+    }
+
+    .detail-field {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start; /* Keeps label and value hard-aligned to the left */
+      gap: 4px;
+      align-self: start;    /* each field only as tall as its content */
+    }
+    .detail-field.wide {
+      grid-column: 1 / -1;   /* spans all columns */
+    }
+    .detail-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .6px;
+      text-transform: uppercase;
+      color: #8b949e;
+    }
+    .detail-value {
+      font-size: 12px;
+      color: #c9d1d9;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .detail-value.mono {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 8px;
+      max-height: 400px;
+      overflow: auto;
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* ── Level badges ── */
+    .level {
+      border-radius: 4px;
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      padding: 2px 6px;
+      white-space: nowrap;
+    }
+    .level-INFO  { background: #1f3a2b; color: #3fb950; }
+    .level-DEBUG { background: #1a2a40; color: #79c0ff; }
+    .level-WARN  { background: #2d2000; color: #e3b341; }
+    .level-ERROR { background: #3d1a1a; color: #f85149; }
+
+    /* ── Inline column cell styles ── */
+    .col-context-cell { color: #79c0ff; }
+
+    /* ── Source / status pills (API log) ── */
+    .source-pill {
+      background: #21262d;
+      border-radius: 4px;
+      color: #c9d1d9;
+      font-size: 10px;
+      padding: 1px 6px;
+    }
+
+    /* ── Data/payload inline summary ── */
+    .payload-hint {
+      font-size: 11px;
+      color: #58a6ff;
+      background: #1a2740;
+      border: 1px solid #1f3a5f;
+      border-radius: 4px;
+      padding: 2px 8px;
+      display: inline-block;
+    }
+    .payload-none {
+      color: #444d56;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>📋 Log Viewer</h1>
+  <span class="badge">{{ filters.source }}</span>
+  <span class="badge">{{ total }} entries</span>
+</header>
+
+<!-- ── Filter form ───────────────────────────────────────────────────── -->
+<form class="filter-bar" method="get" action="/logs">
+
+  <div class="filter-group">
+    <label>Source</label>
+    <select name="source">
+      {% for s in sources %}
+        <option value="{{ s }}" {% if s == filters.source %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="filter-group">
+    <label>Level</label>
+    <select name="level">
+      <option value="">All</option>
+      {% for l in levels %}
+        <option value="{{ l }}" {% if l == filters.level %}selected{% endif %}>{{ l }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="filter-group">
+    <label>Date</label>
+    <input type="date" name="date" value="{{ filters.date }}" />
+  </div>
+
+  <div class="filter-group">
+    <label>Trace ID</label>
+    <input type="text" name="trace_id" value="{{ filters.trace_id }}" placeholder="abc-123…" />
+  </div>
+
+  <div class="filter-group">
+    <label>Message search</label>
+    <input type="text" name="search" value="{{ filters.search }}" placeholder="keyword…" />
+  </div>
+
+  <div class="filter-group">
+    <label>Limit</label>
+    <input type="number" name="limit" value="{{ filters.limit }}" min="10" max="500" step="10" />
+  </div>
+
+  <button type="submit" class="btn">Apply</button>
+  <a href="/logs"><button type="button" class="btn btn-reset">Reset</button></a>
+
+</form>
+
+<!-- ── Notices ───────────────────────────────────────────────────────── -->
+{% if error %}
+  <div class="notice warn">⚠ {{ error }}</div>
+{% endif %}
+
+{% if entries %}
+<!-- ── Log table ─────────────────────────────────────────────────────── -->
+<div class="table-wrap">
+  <table>
+    <colgroup>
+      <col class="col-ts" />
+      <col class="col-level" />
+      <col class="col-context" />
+      <col class="col-trace" />
+      <col class="col-msg" />
+      <col class="col-data" />
+    </colgroup>
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Level</th>
+        <th>Context / Source</th>
+        <th>Trace ID</th>
+        <th>Message</th>
+        <th>Data / Payload</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in entries %}
+      {# ── Summary row ── #}
+      <tr class="data-row" onclick="toggleRow(this)" title="Click to expand">
+
+        <!-- Timestamp -->
+        <td class="col-ts-cell">{{ entry.timestamp | truncate(19, False, '') }}</td>
+
+        <!-- Level -->
+        <td>
+          <span class="level level-{{ entry.level }}">{{ entry.level }}</span>
+        </td>
+
+        <!-- Context (app log) or Source (API log) -->
+        <td class="col-context-cell" title="{{ entry.context or entry.source or '' }}">
+          {% if entry.source %}
+            <span class="source-pill">{{ entry.source }}</span>
+          {% else %}
+            {{ entry.context or '—' }}
+          {% endif %}
+        </td>
+
+        <!-- Trace ID -->
+        <td title="{{ entry.trace_id or '' }}" style="color:#8b949e;">
+          {{ entry.trace_id or '—' }}
+        </td>
+
+        <!-- Message (truncated in summary, full in detail) -->
+        <td title="{{ entry.message }}">{{ entry.message }}</td>
+
+        <!-- Payload hint -->
+        <td>
+          {% set payload = entry.get('data') or entry.get('request') or entry.get('error') %}
+          {% if payload %}
+            <span class="payload-hint">
+              {% if entry.get('request') %}request / response
+              {% elif entry.get('error') %}error
+              {% else %}data
+              {% endif %}
+              ↓
+            </span>
+          {% else %}
+            <span class="payload-none">—</span>
+          {% endif %}
+        </td>
+
+      </tr>
+
+      {# ── Detail row (hidden until clicked) ── #}
+      <tr class="detail-row">
+        <td colspan="6">
+          <div class="detail-panel">
+
+            <!-- Timestamp -->
+            <div class="detail-field">
+              <span class="detail-label">Timestamp</span>
+              <span class="detail-value">{{ entry.timestamp }}</span>
+            </div>
+
+            <!-- Level -->
+            <div class="detail-field">
+              <span class="detail-label">Level</span>
+                <span class="level level-{{ entry.level }}">{{ entry.level }}</span>
+            </div>
+
+            <!-- Context / Source -->
+            <div class="detail-field">
+              <span class="detail-label">Context / Source</span>
+              <span class="detail-value">{{ entry.context or entry.source or '—' }}</span>
+            </div>
+
+            <!-- Trace ID -->
+            <div class="detail-field">
+              <span class="detail-label">Trace ID</span>
+              <span class="detail-value">{{ entry.trace_id or '—' }}</span>
+            </div>
+
+            <!-- Message (full) -->
+            <div class="detail-field wide">
+              <span class="detail-label">Message</span>
+              <span class="detail-value">{{ entry.message }}</span>
+            </div>
+
+            <!-- Error -->
+            {% if entry.get('error') %}
+            <div class="detail-field wide">
+              <span class="detail-label">Error</span>
+              <pre class="detail-value mono">{{ entry.error }}</pre>
+            </div>
+            {% endif %}
+
+            <!-- Error stack -->
+            {% if entry.get('error_stack') %}
+            <div class="detail-field wide">
+              <span class="detail-label">Stack Trace</span>
+              <pre class="detail-value mono">{{ entry.error_stack }}</pre>
+            </div>
+            {% endif %}
+
+            <!-- Data (AppLog) -->
+            {% if entry.get('data') %}
+            <div class="detail-field wide">
+              <span class="detail-label">Data</span>
+              <pre class="detail-value mono">{{ entry.data | tojson(indent=2) }}</pre>
+            </div>
+            {% endif %}
+
+            <!-- Request (ApiLog) -->
+            {% if entry.get('request') %}
+            <div class="detail-field wide">
+              <span class="detail-label">Request</span>
+              <pre class="detail-value mono">{{ entry.request | tojson(indent=2) }}</pre>
+            </div>
+            {% endif %}
+
+            <!-- Response (ApiLog) -->
+            {% if entry.get('response') %}
+            <div class="detail-field wide">
+              <span class="detail-label">Response</span>
+              <pre class="detail-value mono">{{ entry.response | tojson(indent=2) }}</pre>
+            </div>
+            {% endif %}
+
+            <!-- Response time -->
+            {% if entry.get('response_time_ms') %}
+            <div class="detail-field">
+              <span class="detail-label">Response Time</span>
+              <span class="detail-value">{{ entry.response_time_ms }} ms</span>
+            </div>
+            {% endif %}
+
+            <!-- Status (ApiLog) -->
+            {% if entry.get('status') is not none %}
+            <div class="detail-field">
+              <span class="detail-label">Status</span>
+              <span class="detail-value">{{ '✅ success' if entry.status else '❌ failure' }}</span>
+            </div>
+            {% endif %}
+
+          </div>
+        </td>
+      </tr>
+
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% else %}
+  <div class="notice empty">No log entries match the current filters.</div>
+{% endif %}
+
+<script>
+  function toggleRow(summaryTr) {
+    const detailTr = summaryTr.nextElementSibling;
+    const isOpen = detailTr.classList.contains('visible');
+
+    // Optionally close others — remove the two lines below to allow multiple open at once
+    document.querySelectorAll('tr.detail-row.visible').forEach(r => r.classList.remove('visible'));
+    document.querySelectorAll('tr.data-row.expanded').forEach(r => r.classList.remove('expanded'));
+
+    if (!isOpen) {
+      detailTr.classList.add('visible');
+      summaryTr.classList.add('expanded');
+    }
+  }
+</script>
+
+</body>
+</html>
